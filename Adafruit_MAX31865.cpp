@@ -42,7 +42,10 @@ Adafruit_MAX31865::Adafruit_MAX31865(int8_t spi_cs) {
   _sclk = _miso = _mosi = -1;
 }
 
-boolean Adafruit_MAX31865::begin(max31865_numwires_t wires) {
+boolean Adafruit_MAX31865::begin(max31865_numwires_t wires,
+  float RTDnominal, float refResistor) {
+  RnomInv = 1./RTDnominal;
+  Rref = refResistor/32768.;
   pinMode(_cs, OUTPUT);
   digitalWrite(_cs, HIGH);
 
@@ -113,55 +116,63 @@ void Adafruit_MAX31865::setWires(max31865_numwires_t wires ) {
   writeRegister8(MAX31856_CONFIG_REG, t);
 }
 
-float  Adafruit_MAX31865::temperature(float RTDnominal, float refResistor) {
+float  Adafruit_MAX31865::temperature(uint8_t order) {
   // http://www.analog.com/media/en/technical-documentation/application-notes/AN709_0.pdf
+  // http://www.mosaic-industries.com/embedded-systems/microcontroller-projects/temperature-measurement/platinum-rtd-sensors/resistance-calibration-table
 
-  float Z1, Z2, Z3, Z4, Rt, temp;
+  float Rt, temp;
 
   Rt = readRTD();
-  Rt /= 32768;
-  Rt *= refResistor;
+  Rt *= Rref;
   
   // Serial.print("\nResistance: "); Serial.println(Rt, 8);
-
-  Z1 = -RTD_A;
-  Z2 = RTD_A * RTD_A - (4 * RTD_B);
-  Z3 = (4 * RTD_B) / RTDnominal;
-  Z4 = 2 * RTD_B;
-
-  temp = Z2 + (Z3 * Rt);
-  temp = (sqrt(temp) + Z1) / Z4;
-  
-  if (temp >= 0) return temp;
-
-  // ugh.
-  Rt /= RTDnominal;
-  Rt *= 100;      // normalize to 100 ohm
-
-  float rpoly = Rt;
-
-  temp = -242.02;
-  temp += 2.2228 * rpoly;
-  rpoly *= Rt;  // square
-  temp += 2.5859e-3 * rpoly;
-  rpoly *= Rt;  // ^3
-  temp -= 4.8260e-6 * rpoly;
-  rpoly *= Rt;  // ^4
-  temp -= 2.8183e-8 * rpoly;
-  rpoly *= Rt;  // ^5
-  temp += 1.5243e-10 * rpoly;
+  if( order == 4 ){
+    // 4th-order rational function
+    float Z1, Z2, Z3, Z4;
+    Z1 = -RTD_A;
+    Z2 = RTD_A * RTD_A - (4 * RTD_B);
+    Z3 = (4 * RTD_B) * RnomInv;
+    Z4 = 2 * RTD_B;
+    temp = Z2 + (Z3 * Rt);
+    temp = (sqrt(temp) + Z1) / Z4;
+  } else if( order == 5 ){
+    // 5th-order polynomial.
+    // Not sure where these coeffecients come from
+    Rt *= 100*RnomInv;      // normalize to 100 ohm
+    float rpoly = Rt;
+    temp = -242.02;
+    temp += 2.2228 * rpoly;
+    rpoly *= Rt;  // square
+    temp += 2.5859e-3 * rpoly;
+    rpoly *= Rt;  // ^3
+    temp -= 4.8260e-6 * rpoly;
+    rpoly *= Rt;  // ^4
+    temp -= 2.8183e-8 * rpoly;
+    rpoly *= Rt;  // ^5
+    temp += 1.5243e-10 * rpoly;
+  } else {
+    // First-order approximation. Very fast, and good for most purposes
+    temp = (Rt*RnomInv - 1) * (1e6/3850.);
+  }
 
   return temp;
 }
 
 uint16_t Adafruit_MAX31865::readRTD (void) {
   clearFault();
-  enableBias(true);
-  delay(10);
   uint8_t t = readRegister8(MAX31856_CONFIG_REG);
-  t |= MAX31856_CONFIG_1SHOT;      
-  writeRegister8(MAX31856_CONFIG_REG, t);
-  delay(65);
+  if( !t & MAX31856_CONFIG_BIAS ){
+    enableBias(true);
+    delay(13);
+  }
+  if( !t & MAX31856_CONFIG_MODEAUTO ){
+    t |= MAX31856_CONFIG_1SHOT;      
+    writeRegister8(MAX31856_CONFIG_REG, t);
+    delay(65);
+  }
+  // If you're using autoconvert, we assume that you are
+  // either using the ~DRDY pin, or have set up delays
+  // somewhere else in your code.
 
   uint16_t rtd = readRegister16(MAX31856_RTDMSB_REG);
 
